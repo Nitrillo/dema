@@ -1,0 +1,15 @@
+{
+    "name" : "otkit",
+
+    "variants": ["android_armv7", "android_x86"],
+
+    "make": "CONFIGURATION=$CONFIGURATION ./build.sh $VARIANT",
+
+    "dependencies": [
+        {
+            "name": "webrtc",
+            "git": "https://github.com/opentok/webrtc-build-scripts",
+            "branch": "dema-test"
+        }
+    ]
+}

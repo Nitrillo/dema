@@ -1,0 +1,433 @@
+#!/usr/bin/python2.7
+# -*- coding: utf-8 -*- 
+# 
+import sys
+import argparse
+import ConfigParser
+import unicodedata
+import subprocess
+import os
+import re
+import shutil
+from urlparse import urlparse
+import json
+import sys
+import string
+import glob
+
+FNULL = open(os.devnull, 'w')
+cache_manager = None
+current_dir = os.getcwd()
+
+def read_local_dep_info(file):
+    
+    try: 
+        with open(file) as json_data:
+            return json.load(json_data)
+    except Exception as e: 
+        print "Error:" , e
+        sys.exit(1)
+
+
+def read_global_config():
+    global cache_manager
+    try: 
+        config = ConfigParser.ConfigParser(allow_no_value=True)
+
+        path = os.path.join(os.path.expanduser('~'), 'dema', 'global.cfg')
+        config.read(path)
+
+        cache_url = config.get("default", "cache", None)
+        if cache_url:
+            o = urlparse(cache_url)
+            scheme = o.scheme
+            try:
+                cache_manager = __import__("provider.%s" % scheme, fromlist=["provider"])
+            except ImportError:
+                pass
+    except Exception: 
+        pass
+
+def get_commit_from_git(url, branch):
+    command = 'git ls-remote "%s" %s' % (url , branch)
+    p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+    output, errors = p.communicate()
+    return output.splitlines(True)[0].split('\t')[0]
+
+def get_commit_from_branch():
+    command = 'git rev-parse HEAD'
+    p = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+    output, errors = p.communicate()
+    return output.splitlines(True)[0].rstrip()
+
+def get_variant_string(var, variant, substitutions):
+    s = var
+    if  type(var) is dict:
+        s = var[variant]
+
+    t = string.Template(s)
+    return t.safe_substitute(substitutions)
+
+def clean_dep(dep_info, variant, configuration):
+
+    name = dep_info['name']
+
+    print "Cleaning module", name, "..."
+
+    directory = os.path.join(os.getcwd(), 'dema', 'modules', name)
+    out_directory = os.path.join(directory, "out")
+    src_directory = os.path.join(directory, "src")
+
+    module_info = set()
+    module_dep_info_file = os.path.join(src_directory, "dema.json")
+
+    if os.path.exists(module_dep_info_file):
+        module_info = read_local_dep_info(module_dep_info_file)
+    else:
+        module_info = dep_info
+
+    if 'dependencies' in module_info:
+        for dep in module_info['dependencies']:
+            clean_dep(dep, variant, configuration)
+
+    if os.path.exists(out_directory):
+        shutil.rmtree(out_directory)
+
+def get_compile_dirs(dep_info, variant, configuration):
+    name = dep_info['name']
+    directory = os.path.join(os.getcwd(), 'dema', 'modules', name)
+    src_directory = os.path.join(directory, "src")
+    out_directory = os.path.join(directory, "out")
+
+    module_info = set()
+
+    module_dep_info_file = os.path.join(src_directory, "dema.json")
+
+    if os.path.exists(module_dep_info_file):
+        module_info = read_local_dep_info(module_dep_info_file)
+    else:
+        module_info = dep_info
+
+    # variant rewrite
+    new_variant = variant
+    if 'variants' in dep_info:
+        new_variant = dep_info['variants'][variant]
+
+    include_dir = None
+    lib_dir = None
+
+    if 'includes' in module_info:
+        include_dir = os.path.join(out_directory, "include")
+
+    if 'libs' in dependency_info:
+        lib_dir = os.path.join(out_directory, "lib")
+
+    return include_dir, lib_dir
+
+def compile_dep(dep_info, variant, configuration):
+
+    name = dep_info['name']
+    commit = None
+
+    print "Creating module", name, "..."
+
+    directory = os.path.join(os.getcwd(), 'dema', 'modules', name)
+    src_directory = os.path.join(directory, "src")
+    out_directory = os.path.join(directory, "out")
+
+    if not os.path.exists(out_directory):
+        os.makedirs(out_directory)
+
+    # TODO: check cache provider
+    
+    if dep_info['git']:
+        # GIT repository
+        current_module_dir = os.getcwd();
+        try:
+            if not os.path.exists(src_directory):
+                subprocess.call('git clone "%s" %s' % (dep_info['git'], src_directory) , shell=True, 
+                                stdout=FNULL, stderr=subprocess.STDOUT)
+                os.chdir(src_directory)
+            else:
+                os.chdir(src_directory)
+                subprocess.call('git fetch', shell=True, stdout=FNULL, stderr=subprocess.STDOUT)
+
+            if 'branch' in dep_info:
+                print "Updating branch", dep_info['branch']
+
+                subprocess.call('git checkout %s' % dep_info['branch'], shell=True, stdout=FNULL, stderr=subprocess.STDOUT)
+                subprocess.call('git pull origin %s' % dep_info['branch'], shell=True, stdout=FNULL, stderr=subprocess.STDOUT)
+                commit = get_commit_from_branch()
+
+                if commit == read_module_config(name):
+                    print "Module up-to-date"
+                    return
+
+            elif 'commit' in dep_info:
+                commit = dep_info['commit']
+
+                print "Updating to commit", commit
+
+                if commit == read_module_config(name):
+                    print "Module up-to-date"
+                    return
+                subprocess.call('git checkout %s' % (dep_info['commit']) , shell=True, stdout=FNULL, stderr=subprocess.STDOUT)
+        finally:
+            os.chdir(current_module_dir)
+
+
+    module_info = set()
+
+    module_dep_info_file = os.path.join(src_directory, "dema.json")
+
+    if os.path.exists(module_dep_info_file):
+        module_info = read_local_dep_info(module_dep_info_file)
+    else:
+        module_info = dep_info
+
+    # variant rewrite
+    new_variant = variant
+    if 'variants' in dep_info:
+        new_variant = dep_info['variants'][variant]
+
+    if do_build(False, src_directory, out_directory, module_info, new_variant, configuration):
+        save_module_config(name, commit)
+
+def install(args):
+    dependency_info = read_local_dep_info("dema.json")
+    variant, configuration = read_config()
+
+    if 'dependencies' in dependency_info:
+        for dep in dependency_info['dependencies']:
+            compile_dep(dep, variant, configuration)
+
+
+def do_build(is_main, src_directory, out_directory, dependency_info, variant, configuration):
+    os.chdir(src_directory)
+    print "Current dir:",src_directory
+    try:
+        if not is_main:
+            if 'dependencies' in dependency_info:
+                for dep in dependency_info['dependencies']:
+                    compile_dep(dep, variant, configuration)
+
+        if 'make' in dependency_info:
+            s = get_variant_string(dependency_info['make'], variant, {"VARIANT":variant, 
+                               "CONFIGURATION":configuration,
+                               "SOURCE_DIR":src_directory
+            })
+            print "Making:",s
+            if subprocess.call(s, shell=True, env=os.environ.copy()) != 0:
+                print "Compilation error"
+                sys.exit(1)
+        
+        if 'includes' in dependency_info:
+            out_inc = os.path.join(out_directory, "include")
+            
+            if not os.path.exists(out_inc):
+                os.makedirs(out_inc)
+
+            includes = dependency_info['includes']
+            if not type(includes) is list:
+                includes = [includes]
+            for inc_path in includes:
+                for src_inc in glob.glob(os.path.join(src_directory, inc_path)):
+                    print "Copying header:" , src_inc
+                    name = os.path.basename(src_inc)
+                    out_path = os.path.join(out_inc, name)
+                    if os.path.isdir(src_inc):
+                        if os.path.exists(out_path):
+                            shutil.rmtree(out_path)
+                        shutil.copytree(src_inc, out_path)
+                    else:
+                        shutil.copy(src_inc, out_path)
+
+        if 'libs' in dependency_info:
+            out_lib = os.path.join(out_directory, "lib")
+            if not os.path.exists(out_lib):
+                os.makedirs(out_lib)
+
+            libs = dependency_info['libs']
+            if not type(libs) is list:
+                libs = [libs]
+            for lib in libs:
+                for src_lib in glob.glob(os.path.join(src_directory, lib)):
+                    name = os.path.basename(src_lib)
+                    shutil.copy(src_lib, os.path.join(out_lib, name))
+
+        return True
+    except:
+        return False
+    finally:
+        os.chdir(current_dir)
+
+def build(args):
+    dependency_info = read_local_dep_info("dema.json")
+
+    src_directory = os.getcwd()
+
+    directory = os.path.join(os.getcwd(), "dema")
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+
+    out_directory = os.path.join(directory, "out")
+    if not os.path.exists(out_directory):
+        os.makedirs(out_directory)
+
+    variant, configuration = read_config()
+
+    if not variant in dependency_info['variants']:
+        print "Invalid variant", variant
+        print "Possible values:" , "|".join(dependency_info['variants'])
+        sys.exit(1)
+
+    do_build(True, src_directory, out_directory, dependency_info, variant, configuration)
+
+
+def read_config():
+    directory = os.path.join(current_dir, "dema")
+    config_file = os.path.join(directory, 'build.cfg')
+    
+    config = ConfigParser.ConfigParser(allow_no_value=True)
+    config.read(config_file)
+
+    old_configuration = None
+    old_variant = None
+    try:
+        old_variant = config.get("config", "variant")
+        old_configuration = config.get("config", "configuration")
+    except:
+        pass
+
+    return old_variant, old_configuration
+
+def read_module_config(module):
+    directory = os.path.join(current_dir, "dema")
+    config_file = os.path.join(directory, 'build.cfg')
+    
+    config = ConfigParser.ConfigParser(allow_no_value=True)
+    config.read(config_file)
+
+    commit = None
+    try:
+        commit = config.get("config", module)
+    except:
+        pass
+
+    return commit
+
+
+def save_config(variant, configuration):
+    directory = os.path.join(current_dir, "dema")
+    config_file = os.path.join(directory, 'build.cfg')
+    
+    config = ConfigParser.ConfigParser(allow_no_value=True)
+    if os.path.exists(config_file):
+        config.read(config_file)
+
+    if not config.has_section('config'):
+        config.add_section('config')
+
+    config.set('config', 'variant', variant)
+    config.set('config', 'configuration', configuration)
+
+    with open(config_file, 'wb') as cf:
+        config.write(cf)
+        cf.close()
+
+def save_module_config(module, value):
+    directory = os.path.join(current_dir, "dema")
+    config_file = os.path.join(directory, 'build.cfg')
+    
+    config = ConfigParser.ConfigParser(allow_no_value=True)
+    if os.path.exists(config_file):
+        config.read(config_file)
+
+    if not config.has_section('config'):
+        config.add_section('config')
+
+    config.set('config', module, value)
+
+    with open(config_file, 'wb') as cf:
+        config.write(cf)
+        cf.close()
+
+
+def select(args):
+    dependency_info = read_local_dep_info("dema.json")
+
+
+    if not args.variant in dependency_info['variants']:
+        print "Invalid variant", args.variant
+        print "Possible values:" , "|".join(dependency_info['variants'])
+        sys.exit(1)
+
+    old_variant, old_configuration = read_config()
+
+    if old_configuration or old_variant:
+        if old_variant != args.variant or old_configuration != args.configuration:
+            if 'dependencies' in dependency_info:
+                for dep in dependency_info['dependencies']:
+                    clean_dep(dep, args.variant, args.configuration)
+
+    save_config(args.variant, args.configuration)
+
+    print "\tVariant selected:", args.variant
+    print "\tCurrent configuration:", args.configuration
+
+def update(args):
+    pass
+
+ops = { 
+    "select": select,
+    "install": install,
+    "update": update,
+    "build": build
+}
+
+def main():
+    print u"Demà: a lightweight c/c++ dependency manager" 
+
+    read_global_config()
+
+    if not os.path.exists(os.path.join(current_dir, 'dema.json')):
+        print "Package info file 'dema.json' not found"
+        sys.exit(1)
+
+    dependency_info = read_local_dep_info('dema.json')
+
+    # always create temporal directory
+    directory = os.path.join(os.getcwd(), "dema")
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+        
+    parser = argparse.ArgumentParser(prog='dema')
+
+    sub = parser.add_subparsers(help='commands')
+
+    select = sub.add_parser("select", help="Select the variant to build")
+    select.add_argument('variant', type=str, help='Specific variant to build: '+ "|".join(dependency_info['variants']))
+    select.add_argument('-c', '--configuration', type=str, default="Release", help="Build configuration (Debug, Release)")
+    select.set_defaults(which='select')
+    
+    create = sub.add_parser("install", help="Install (and compile if necessary) project dependencies")
+    create.add_argument('-b', '--no-cache', action='store_true', help="Don\'t cache dependency builds")
+    create.set_defaults(which='install')
+
+    build = sub.add_parser("build", help="Build project")
+    build.set_defaults(which='build')
+
+    cflags = sub.add_parser("cflags", help="Print the cflags needed for a module")
+    cflags.add_argument('module', type=str, help='Dependency module name')
+    cflags.set_defaults(which='cflags')
+    
+    args = parser.parse_args()
+    
+    if args.which:
+        ops[args.which](args)
+
+if __name__ == "__main__":
+    try:
+        main()
+    finally:
+        os.chdir(current_dir)
